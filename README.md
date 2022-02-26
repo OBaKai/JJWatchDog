@@ -23,40 +23,33 @@ SystemServer WatchDog机制：主要是用来监控系统服务是否因为耗�
 
 
 #### Introduce
-
 Inspired by SystemServer WatchDog mechanism.
-
 SystemServer WatchDog mechanism: it is mainly used to monitor whether system services are stuck due to time-consuming tasks, deadlocks and other reasons. If the jam exceeds the maximum tolerance time, the system server will restart (framework layer restart).
 
-
-
 This project largely refers to the implementation of SystemServer WatchDog, and has been transformed and enriched according to the actual scenario of the app.
-
 **Monitoring thread**: JJWatchDog will send messages to the monitored handler at regular intervals. If the message cannot be executed within the specified time, an alarm will be given.
-
 **Monitoring Main thread**: JJWatchDog will monitor the main thread by default. Like monitoring sub threads, it also sends messages at regular intervals. It can be used to monitor anr, but it is not necessarily accurate. However, it can be used as a reference, because it is also dangerous to have time-consuming tasks in the main thread.
-
 **Monitoring Deadlock**:JJWatchDog will use a thread to check the lock, and this thread will also be added to thread monitoring. Lock monitoring can be realized as long as the lock is obtained in the implementation of monitor. If the message sent cannot be executed within the specified time, an alarm will be given.
 
 
 
 #### 依赖方式（Dependencies）
 
-```gr
+```java
 dependencies {
-	        implementation 'com.github.OBaKai:JJWatchDog:latest.release'
-	}
+	implementation 'com.github.OBaKai:JJWatchDog:latest.release'
+}
 ```
 
 
 
-```gr
+```java
 allprojects {
-		repositories {
-			...
-			maven { url 'https://jitpack.io' }
-		}
+	repositories {
+		...
+		maven { url 'https://jitpack.io' }
 	}
+}
 ```
 
 
@@ -65,22 +58,22 @@ allprojects {
 
 ```java
 JJWatchDog.get()
-                .setCheckTimeInterval(5 * 1000)
-                .customMainThreadChecker(5 * 1000)
-                .isPrintLog(BuildConfig.DEBUG)
-                .setWatchDogListener(new JJWatchDog.WatchDogListener() {
-                    @Override
-                    public void onThreadBlocked(String threadName, JJWatchDog.WatchDogThrowable throwable) {
-                        Log.e("WatchDog_Log", "onThreadBlocked " + threadName);
+	.setCheckTimeInterval(5 * 1000)
+	.customMainThreadChecker(5 * 1000)
+	.isPrintLog(BuildConfig.DEBUG)
+	.setWatchDogListener(new JJWatchDog.WatchDogListener() {
+		@Override
+		public void onThreadBlocked(String threadName, JJWatchDog.WatchDogThrowable throwable) {
+			Log.e("WatchDog_Log", "onThreadBlocked " + threadName);
                         throwable.printStackTrace();
-                    }
+                }
 
-                    @Override
-                    public void onHandleMessageOverdue(String messageInfo) {
-                        Log.e("WatchDog_Log", "onHandleMessageOverdue " + messageInfo);
-                    }
-                })
-                .loop();
+                @Override
+                public void onHandleMessageOverdue(String messageInfo) {
+			Log.e("WatchDog_Log", "onHandleMessageOverdue " + messageInfo);
+                }
+	})
+	.loop();
 ```
 
 
@@ -95,8 +88,8 @@ JJWatchDog.get().addThread(handler);
 ```java
 //添加死锁监控
 JJWatchDog.get().addMonitor(() -> {
-  					//获取一下需要监控的锁
-            synchronized (lock){ }
-        });
+	//获取一下需要监控的锁
+	synchronized (lock){ }
+});
 ```
 
