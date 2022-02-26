@@ -10,6 +10,13 @@
     <Button
         android:layout_width="match_parent"
         android:layout_height="100dp"
+        android:text="test main thread"
+        android:onClick="testMainThread"
+        />
+
+    <Button
+        android:layout_width="match_parent"
+        android:layout_height="100dp"
         android:text="test thread"
         android:onClick="testThread"
         />

@@ -12,12 +12,14 @@ import android.util.Printer;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * author: JJLeong
  * detail: JJ的看门狗 - 监控线程任务 & 监控死锁
+ * 灵感来源自 SystemServer 里边的 WatchDog
+ *
  * 监控线程任务：定时发送消息检查是否有耗时任务，超时会报警。
  *  主线程监控：可以用来监控ANR但是并不一定准确。不过可以用来做个参考，因为主线程中有耗时任务也是很危险的。
  * 监控死锁：专门有个线程检查锁，只要在Monitor接口的实现里边获取一下锁即可，超时会报警。
@@ -27,7 +29,7 @@ public class JJWatchDog extends Thread{
 
     private static final long DEFAULT_TIMEOUT = 5 * 1000;
 
-    private boolean isWorking;
+    private boolean isWorking = false;
 
     private final ArrayList<HandlerChecker> mHandlerCheckers = new ArrayList<>(2);
 
@@ -43,10 +45,10 @@ public class JJWatchDog extends Thread{
     private WatchDogListener mListener;
     private boolean isPrintLog;
     private long checkTimeInterval = DEFAULT_TIMEOUT;
-    private boolean isCloseDefaultMessageLogging;
-    private boolean isPostAtFrontOfQueue = true;
+    private boolean isCloseDefaultMessageLogging = false;
+    private boolean isPostAtFrontOfQueue = false;
 
-    private boolean isCloseDefaultMainThreadCheck;
+    private boolean isCloseDefaultMainThreadCheck = false;
     private long main_waitMaxMillis = DEFAULT_TIMEOUT;
     private Printer main_Printer;
 
@@ -69,29 +71,28 @@ public class JJWatchDog extends Thread{
     }
 
     /**
-     * 是否关闭内部对所有Handler默认实现的Looper#setMessageLogging
+     * 关闭内部对所有Handler默认实现的Looper#setMessageLogging
      * 默认内部会接管Handler里边的Looper#setMessageLogging，用于分析每个Msg的执行时长让监控器更加精准报警。
      */
-    public JJWatchDog isCloseDefaultMessageLogging(boolean isClose){
-        isCloseDefaultMessageLogging = isClose;
+    public JJWatchDog closeDefaultMessageLogging(){
+        isCloseDefaultMessageLogging = true;
         return this;
     }
 
     /**
-     * 是否关闭内部默认实现的主线程监控器
+     * 关闭内部默认实现的主线程监控器
      */
-    public JJWatchDog isCloseDefaultMainThreadCheck(boolean isClose){
-        isCloseDefaultMainThreadCheck = isClose;
+    public JJWatchDog closeDefaultMainThreadCheck(){
+        isCloseDefaultMainThreadCheck = true;
         return this;
     }
 
     /**
-     * 是否给所有Handler发高优先的Msg
-     * 默认为true
-     * @param isAtFront true: Handler#postAtFrontOfQueue；false：Handler#post
+     * 给所有Handler发高优先的Msg
+     * true: Handler#postAtFrontOfQueue；false：Handler#post
      */
-    public JJWatchDog isPostAtFrontOfQueue(boolean isAtFront){
-        isPostAtFrontOfQueue = isAtFront;
+    public JJWatchDog openPostAtFrontOfQueue(){
+        isPostAtFrontOfQueue = true;
         return this;
     }
 
@@ -140,7 +141,9 @@ public class JJWatchDog extends Thread{
                     main_Printer));
         }
 
-        start();
+        if (!mHandlerCheckers.isEmpty()){
+            start();
+        }
     }
     //endregion
 
@@ -176,7 +179,7 @@ public class JJWatchDog extends Thread{
                 for (HandlerChecker checker : blockedCheckers){
                     log(Log.WARN, "found blockedChecker：" + checker.getName());
                     if (mListener != null){
-                        mListener.onHandleBlocked(checker.getName(),
+                        mListener.onThreadBlocked(checker.getName(),
                                 new WatchDogThrowable(checker.describeBlockedState(),
                                         checker.getThread().getStackTrace()));
                     }
@@ -197,6 +200,10 @@ public class JJWatchDog extends Thread{
                     isCloseDefaultMessageLogging,
                     null);
             mHandlerCheckers.add(mMonitorChecker);
+
+            if (!isWorking){
+                start();
+            }
         }
     }
 
@@ -224,14 +231,20 @@ public class JJWatchDog extends Thread{
         return checkers;
     }
 
-    public void addMonitor(Monitor monitor) {
-        synchronized (this) {
-            if (isAlive()) {
-                throw new RuntimeException("Monitors can't be added once the Watchdog is running");
-            }
-            initMonitorChecker();
+    /**
+     * 添加锁监控
+     */
+    public synchronized void addMonitor(Monitor monitor) {
+        initMonitorChecker();
+        mMonitorChecker.addMonitor(monitor);
+    }
 
-            mMonitorChecker.addMonitor(monitor);
+    /**
+     * 移除锁监控
+     */
+    public synchronized void removeMonitor(Monitor monitor){
+        if (mMonitorChecker != null){
+            mMonitorChecker.removeMonitor(monitor);
         }
     }
 
@@ -239,32 +252,84 @@ public class JJWatchDog extends Thread{
         addThread(thread, checkTimeInterval, true);
     }
 
-    public void addThread(Handler thread, long timeoutMillis, boolean isPostAtFrontOfQueue) {
-        synchronized (this) {
-            if (isAlive()) {
-                throw new RuntimeException("Threads can't be added once the Watchdog is running");
+    /**
+     * 添加子线程监控
+     * @param thread - Handler
+     * @param timeoutMillis - 超时时长
+     * @param isPostAtFrontOfQueue - 是否高优先监控
+     */
+    public synchronized void addThread(Handler thread, long timeoutMillis, boolean isPostAtFrontOfQueue) {
+        if (thread == null){
+            throw new IllegalArgumentException("thread is null.");
+        }
+
+        if (thread.getLooper() == Looper.getMainLooper()){
+            throw new IllegalArgumentException("can't add mainThread.");
+        }
+
+        if (!mHandlerCheckers.isEmpty()){
+            for (HandlerChecker h : mHandlerCheckers){
+                if (h.isSelf(thread)){
+                    throw new IllegalArgumentException("can't add this thread again.");
+                }
             }
-            final String name = thread.getLooper().getThread().getName();
-            mHandlerCheckers.add(new HandlerChecker(thread, name, timeoutMillis, isPostAtFrontOfQueue));
+        }
+
+        HandlerChecker hc = new HandlerChecker(thread,
+                thread.getLooper().getThread().getName(),
+                timeoutMillis,
+                isPostAtFrontOfQueue);
+        log(Log.INFO, "addThread " + hc.getName());
+        mHandlerCheckers.add(hc);
+
+        if (!isWorking){
+            start();
         }
     }
 
+    /**
+     * 移除子线程监控
+     */
+    public synchronized void removeThread(Handler thread){
+        Iterator<HandlerChecker> it = mHandlerCheckers.iterator();
+        while(it.hasNext()){
+            HandlerChecker hc = it.next();
+            if (hc.isSelf(thread)){
+                log(Log.INFO, "removeThread " + hc.getName());
+                hc.release();
+                it.remove();
+            }
+        }
+
+        //没有Checker，就把线程暂停了吧
+        if (mHandlerCheckers.isEmpty()){
+            isWorking = false;
+        }
+    }
+
+    /**
+     * 启动线程
+     */
     @Override
     public synchronized void start() {
+        if (isWorking) return;
+
+        log(Log.INFO, "WatchDog start.");
         isWorking = true;
         super.start();
     }
 
     public synchronized void pause(){
+        log(Log.INFO, "WatchDog pause.");
         isWorking = false;
     }
 
     public synchronized void release(){
+        log(Log.INFO, "WatchDog release.");
         isWorking = false;
 
         for (HandlerChecker hc : mHandlerCheckers){
-            hc.unscheduleCheck();
-            hc.removeAllMonitor();
+            hc.release();
         }
         mHandlerCheckers.clear();
 
@@ -292,10 +357,8 @@ public class JJWatchDog extends Thread{
         private long mStartTime;
         private final boolean isPostAtFront;
 
-        private volatile long mMsgDispatchTime; //msg开始执行时间，该属性会在handler线程、watchdog线程用到
+        private long mMsgDispatchTime; //msg开始执行时间，该属性会在handler线程、watchdog线程用到
         private String mMsgDispatchInfo; //msg信息，该属性会在handler线程、watchdog线程用到
-
-        private ConcurrentLinkedQueue<String> msgOverduequeue;
 
         HandlerChecker(Handler handler, String name, long waitMaxMillis) {
             this(handler, name, waitMaxMillis, true, false,null);
@@ -317,7 +380,6 @@ public class JJWatchDog extends Thread{
             mCompleted = true;
 
             if (!isCloseMessageLogging){
-                msgOverduequeue = new ConcurrentLinkedQueue<>();
                 mHandler.getLooper().setMessageLogging(log -> {
                     evaluateMsgTimeFromMessageLogging(log);
                     if (printer != null){
@@ -331,11 +393,9 @@ public class JJWatchDog extends Thread{
          * 通过Looper日志计算msg执行的耗时
          * 这方法执行在handler线程
          *
-         * msg逾期有两种情况：
-         * 1、在evaluateMsgTimeFromMessageLogging里边发现msg逾期了，但是watchdog线程还在休眠。
+         * msg逾期的情况：
+         * 在evaluateMsgTimeFromMessageLogging里边发现msg逾期了，但是watchdog线程还在休眠。
          * 需要先记录逾期的msg信息，等watchdog执行的时候才报警。
-         * 2、msg已经执行了一段时间了，watchdog才开始检测，这时候msg执行完了，watchdog没检测出异常，可实际上
-         * msg的总执行时长已经预期了。
          */
         private void evaluateMsgTimeFromMessageLogging(String log){
             log(Log.VERBOSE, mName + " log: " + log);
@@ -353,13 +413,15 @@ public class JJWatchDog extends Thread{
                 mMsgDispatchInfo = log.replace(">>>>> Dispatching to ", "");
             }else {
                 long time = mMsgDispatchTime > 0
-                        ? SystemClock.uptimeMillis() - mMsgDispatchTime
-                        : 0;
-                if (time < mWaitMax){ //正常，没有逾期
+                        ? SystemClock.uptimeMillis() - mMsgDispatchTime : 0;
+                if (time < mWaitMax){
                     mMsgDispatchTime = 0;
                     mMsgDispatchInfo = null;
-                }else {
-                    msgOverduequeue.add(mMsgDispatchInfo);
+                }else { //发现该消息逾期了
+                    log(Log.WARN, "found overdue message: " + mMsgDispatchInfo);
+                    if (mListener != null){
+                        mListener.onHandleMessageOverdue(mMsgDispatchInfo);
+                    }
                 }
             }
         }
@@ -410,7 +472,7 @@ public class JJWatchDog extends Thread{
         /**
          * 取消检查
          */
-        public void unscheduleCheck(){
+        private void unscheduleCheck(){
             if (mCompleted){
                 return;
             }
@@ -454,17 +516,11 @@ public class JJWatchDog extends Thread{
             mMonitors.remove(monitor);
         }
 
-        public void removeAllMonitor(){
-            mMonitors.clear();
-        }
-
         /**
          * 是否逾期了
          */
         public boolean isOverdueLocked() {
-            return (!mCompleted)
-                    && (SystemClock.uptimeMillis() > mStartTime + mWaitMax)
-                    && msgOverduequeue != null && !msgOverduequeue.isEmpty();
+            return (!mCompleted) && (SystemClock.uptimeMillis() > mStartTime + mWaitMax);
         }
 
         public boolean isCompletion() {
@@ -481,13 +537,19 @@ public class JJWatchDog extends Thread{
 
         public String describeBlockedState() {
             if (mCurrentMonitor == null) {
-                if (msgOverduequeue != null && !msgOverduequeue.isEmpty()){
-                    return "Blocked in handler on " + msgOverduequeue.poll();
-                }
                 return "Blocked in handler on " + mName + " (" + getThread().getName() + ")";
             } else {
                 return "Blocked in monitor " + mCurrentMonitor.getClass().getName() + " on " + mName + " (" + getThread().getName() + ")";
             }
+        }
+
+        public boolean isSelf(Handler handler){
+            return mHandler == handler;
+        }
+
+        public void release(){
+            unscheduleCheck();
+            mMonitors.clear();
         }
     }
 
@@ -496,7 +558,17 @@ public class JJWatchDog extends Thread{
     }
 
     public interface WatchDogListener{
-        void onHandleBlocked(String threadName, WatchDogThrowable throwable);
+        /**
+         * 检测到有线程阻塞
+         * 在watchdog线程执行回调
+         */
+        void onThreadBlocked(String threadName, WatchDogThrowable throwable);
+
+        /**
+         * 检测到有handle消息逾期了（超出了最大监控时长 HandlerChecker#mWaitMax）
+         * 在handle对应的线程执行回调
+         */
+        default void onHandleMessageOverdue(String messageInfo){};
     }
 
     private static final class MonitorHandler extends HandlerThread{
