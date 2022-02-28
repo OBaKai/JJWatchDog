@@ -27,7 +27,7 @@ import java.util.List;
 public class JJWatchDog extends Thread{
     private static final String TAG = "WatchDog_Log";
 
-    private static final long DEFAULT_TIMEOUT = 5 * 1000;
+    private static final long DEFAULT_TIMEOUT = 20 * 1000;
 
     private boolean isWorking = false;
 
@@ -195,7 +195,7 @@ public class JJWatchDog extends Thread{
 
             mMonitorChecker = new HandlerChecker(mMonitorHandler.getHandler(),
                     mMonitorHandler.getHandler().getLooper().getThread().getName(),
-                    checkTimeInterval,
+                    DEFAULT_TIMEOUT,
                     isPostAtFrontOfQueue,
                     isCloseDefaultMessageLogging,
                     null);
