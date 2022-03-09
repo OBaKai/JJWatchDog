@@ -10,6 +10,9 @@ import java.util.ArrayList;
  * author: JJLeong
  * detail: GC看门狗 - 每次GC都会触发Runnable
  * 灵感来源自 com.android.internal.os.BinderInternal
+ *
+ * 通过弱引用的特性（每次gc都会回收软引用对象），被回收的对象都会执行finalize方法（最后的挣扎）
+ * 然后在finalize方法通知外部，并且重新创建一个弱引用对象继续等待下一次被回收。
  */
 public class GcWatchDog {
     private static WeakReference<GcWatcher> gcWatchDogReference = new WeakReference<>(new GcWatcher());
